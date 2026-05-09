@@ -1,6 +1,12 @@
-[package]
-name = "motor"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = [
+    "motor-driver",
+    "encoder",
+]
+resolver = "3"
 
-[dependencies]
+[workspace.package]
+edition = "2024"
+rust-version = "1.88"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
