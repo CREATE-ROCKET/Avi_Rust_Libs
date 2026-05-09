@@ -6,3 +6,17 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+embassy-time = { version = "0.5.1", optional = true }
+esp-hal = { version = "1.1.0", features = ["esp32s3", "unstable"], optional = true }
+critical-section = { version = "1.2.0", optional = true }
+portable-atomic = { version = "1", optional = true, features = ["critical-section"] }
+
+[features]
+default = []
+async = ["dep:embassy-time"]
+esp32s3-pcnt = [
+    "async",
+    "dep:esp-hal",
+    "dep:critical-section",
+    "dep:portable-atomic",
+]
