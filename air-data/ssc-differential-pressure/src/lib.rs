@@ -146,26 +146,25 @@ where
             SscStatus::DiagnosticFault => return Err(SscError::DiagnosticFault),
         }
 
-        let counts = match self.out_of_range_policy {
+        let pressure_counts = match self.out_of_range_policy {
             OutOfRangePolicy::Error => {
-                if raw.pressure_counts < Spec::OUTPUT_MIN_COUNTS
-                    || raw.pressure_counts > Spec::OUTPUT_MAX_COUNTS
+                if raw.pressure_counts < Spec::VALID_OUTPUT_MIN_COUNTS
+                    || raw.pressure_counts > Spec::VALID_OUTPUT_MAX_COUNTS
                 {
                     return Err(SscError::PressureCountsOutOfRange {
                         counts: raw.pressure_counts,
-                        min: Spec::OUTPUT_MIN_COUNTS,
-                        max: Spec::OUTPUT_MAX_COUNTS,
+                        min: Spec::VALID_OUTPUT_MIN_COUNTS,
+                        max: Spec::VALID_OUTPUT_MAX_COUNTS,
                     });
                 }
-                raw.pressure_counts
+                raw.pressure_counts as f32
             }
-            OutOfRangePolicy::Clamp => raw
-                .pressure_counts
+            OutOfRangePolicy::Clamp => (raw.pressure_counts as f32)
                 .clamp(Spec::OUTPUT_MIN_COUNTS, Spec::OUTPUT_MAX_COUNTS),
-            OutOfRangePolicy::Allow => raw.pressure_counts,
+            OutOfRangePolicy::Allow => raw.pressure_counts as f32,
         };
 
-        let pressure_pa = pressure_counts_to_pa::<Spec>(counts);
+        let pressure_pa = pressure_counts_to_pa::<Spec>(pressure_counts);
         let temperature_c = if let Some(temperature_counts) = raw.temperature_counts {
             if Spec::HAS_VALID_TEMPERATURE_OUTPUT {
                 Some(temperature_counts_to_c(temperature_counts))
@@ -202,19 +201,26 @@ fn validate_transfer_function<Spec, I2cError>() -> Result<(), SscError<I2cError>
 where
     Spec: SscPressureSpec,
 {
-    if Spec::OUTPUT_MAX_COUNTS <= Spec::OUTPUT_MIN_COUNTS {
+    if !(Spec::OUTPUT_MIN_COUNTS.is_finite()
+        && Spec::OUTPUT_MAX_COUNTS.is_finite()
+        && Spec::P_MIN_PA.is_finite()
+        && Spec::P_MAX_PA.is_finite())
+        || Spec::OUTPUT_MAX_COUNTS <= Spec::OUTPUT_MIN_COUNTS
+        || Spec::P_MAX_PA <= Spec::P_MIN_PA
+        || Spec::VALID_OUTPUT_MAX_COUNTS < Spec::VALID_OUTPUT_MIN_COUNTS
+    {
         return Err(SscError::InvalidTransferFunction);
     }
     Ok(())
 }
 
-pub fn pressure_counts_to_pa<Spec>(counts: u16) -> f32
+pub fn pressure_counts_to_pa<Spec>(counts: f32) -> f32
 where
     Spec: SscPressureSpec,
 {
-    let output_span = (Spec::OUTPUT_MAX_COUNTS - Spec::OUTPUT_MIN_COUNTS) as f32;
+    let output_span = Spec::OUTPUT_MAX_COUNTS - Spec::OUTPUT_MIN_COUNTS;
     let pressure_span = Spec::P_MAX_PA - Spec::P_MIN_PA;
-    (counts as f32 - Spec::OUTPUT_MIN_COUNTS as f32) * pressure_span / output_span + Spec::P_MIN_PA
+    (counts - Spec::OUTPUT_MIN_COUNTS) * pressure_span / output_span + Spec::P_MIN_PA
 }
 
 pub fn temperature_counts_to_c(counts: u16) -> f32 {
@@ -299,8 +305,10 @@ mod tests {
         const ADDRESS: u8 = 0x28;
         const P_MIN_PA: f32 = -1.0;
         const P_MAX_PA: f32 = 1.0;
-        const OUTPUT_MIN_COUNTS: u16 = 100;
-        const OUTPUT_MAX_COUNTS: u16 = 100;
+        const OUTPUT_MIN_COUNTS: f32 = 100.0;
+        const OUTPUT_MAX_COUNTS: f32 = 100.0;
+        const VALID_OUTPUT_MIN_COUNTS: u16 = 100;
+        const VALID_OUTPUT_MAX_COUNTS: u16 = 100;
         const HAS_VALID_TEMPERATURE_OUTPUT: bool = false;
     }
 
@@ -310,8 +318,10 @@ mod tests {
         const ADDRESS: u8 = 0x28;
         const P_MIN_PA: f32 = Sscdrrn005pd2a5::P_MIN_PA;
         const P_MAX_PA: f32 = Sscdrrn005pd2a5::P_MAX_PA;
-        const OUTPUT_MIN_COUNTS: u16 = Sscdrrn005pd2a5::OUTPUT_MIN_COUNTS;
-        const OUTPUT_MAX_COUNTS: u16 = Sscdrrn005pd2a5::OUTPUT_MAX_COUNTS;
+        const OUTPUT_MIN_COUNTS: f32 = Sscdrrn005pd2a5::OUTPUT_MIN_COUNTS;
+        const OUTPUT_MAX_COUNTS: f32 = Sscdrrn005pd2a5::OUTPUT_MAX_COUNTS;
+        const VALID_OUTPUT_MIN_COUNTS: u16 = Sscdrrn005pd2a5::VALID_OUTPUT_MIN_COUNTS;
+        const VALID_OUTPUT_MAX_COUNTS: u16 = Sscdrrn005pd2a5::VALID_OUTPUT_MAX_COUNTS;
         const HAS_VALID_TEMPERATURE_OUTPUT: bool = true;
     }
 
@@ -367,14 +377,14 @@ mod tests {
     }
 
     #[test]
-    fn converts_output_min_counts_to_min_pressure() {
+    fn converts_transfer_min_counts_to_min_pressure() {
         let pressure = pressure_counts_to_pa::<Sscdrrn005pd2a5>(Sscdrrn005pd2a5::OUTPUT_MIN_COUNTS);
 
         assert!((pressure - Sscdrrn005pd2a5::P_MIN_PA).abs() < 0.001);
     }
 
     #[test]
-    fn converts_output_max_counts_to_max_pressure() {
+    fn converts_transfer_max_counts_to_max_pressure() {
         let pressure = pressure_counts_to_pa::<Sscdrrn005pd2a5>(Sscdrrn005pd2a5::OUTPUT_MAX_COUNTS);
 
         assert!((pressure - Sscdrrn005pd2a5::P_MAX_PA).abs() < 0.001);
@@ -383,10 +393,23 @@ mod tests {
     #[test]
     fn converts_mid_counts_to_near_zero_pressure() {
         let mid_counts =
-            (Sscdrrn005pd2a5::OUTPUT_MIN_COUNTS + Sscdrrn005pd2a5::OUTPUT_MAX_COUNTS) / 2;
+            (Sscdrrn005pd2a5::OUTPUT_MIN_COUNTS + Sscdrrn005pd2a5::OUTPUT_MAX_COUNTS) / 2.0;
         let pressure = pressure_counts_to_pa::<Sscdrrn005pd2a5>(mid_counts);
 
         assert!(pressure.abs() < 0.001);
+    }
+
+    #[test]
+    fn valid_integer_bounds_are_close_to_pressure_bounds() {
+        let min_pressure = pressure_counts_to_pa::<Sscdrrn005pd2a5>(
+            Sscdrrn005pd2a5::VALID_OUTPUT_MIN_COUNTS as f32,
+        );
+        let max_pressure = pressure_counts_to_pa::<Sscdrrn005pd2a5>(
+            Sscdrrn005pd2a5::VALID_OUTPUT_MAX_COUNTS as f32,
+        );
+
+        assert!(min_pressure <= Sscdrrn005pd2a5::P_MIN_PA);
+        assert!(max_pressure >= Sscdrrn005pd2a5::P_MAX_PA);
     }
 
     #[test]
@@ -427,7 +450,7 @@ mod tests {
     #[test]
     fn command_mode_returns_error() {
         let i2c = DummyI2c {
-            response: response(SscStatus::CommandMode, Sscdrrn005pd2a5::OUTPUT_MIN_COUNTS),
+            response: response(SscStatus::CommandMode, Sscdrrn005pd2a5::VALID_OUTPUT_MIN_COUNTS),
         };
         let mut sensor = SscDifferentialPressure::<_, Sscdrrn005pd2a5>::new(i2c).unwrap();
 
@@ -437,7 +460,7 @@ mod tests {
     #[test]
     fn stale_data_returns_error_by_default() {
         let i2c = DummyI2c {
-            response: response(SscStatus::StaleData, Sscdrrn005pd2a5::OUTPUT_MIN_COUNTS),
+            response: response(SscStatus::StaleData, Sscdrrn005pd2a5::VALID_OUTPUT_MIN_COUNTS),
         };
         let mut sensor = SscDifferentialPressure::<_, Sscdrrn005pd2a5>::new(i2c).unwrap();
 
@@ -447,7 +470,7 @@ mod tests {
     #[test]
     fn stale_data_can_be_allowed() {
         let i2c = DummyI2c {
-            response: response(SscStatus::StaleData, Sscdrrn005pd2a5::OUTPUT_MIN_COUNTS),
+            response: response(SscStatus::StaleData, Sscdrrn005pd2a5::VALID_OUTPUT_MIN_COUNTS),
         };
         let mut sensor = SscDifferentialPressure::<_, Sscdrrn005pd2a5>::new(i2c).unwrap();
         let sample = block_on(sensor.read_pressure_allow_stale()).unwrap();
@@ -460,7 +483,7 @@ mod tests {
         let i2c = DummyI2c {
             response: response(
                 SscStatus::DiagnosticFault,
-                Sscdrrn005pd2a5::OUTPUT_MIN_COUNTS,
+                Sscdrrn005pd2a5::VALID_OUTPUT_MIN_COUNTS,
             ),
         };
         let mut sensor = SscDifferentialPressure::<_, Sscdrrn005pd2a5>::new(i2c).unwrap();
@@ -474,16 +497,19 @@ mod tests {
     #[test]
     fn error_policy_rejects_counts_below_min() {
         let i2c = DummyI2c {
-            response: response(SscStatus::Normal, Sscdrrn005pd2a5::OUTPUT_MIN_COUNTS - 1),
+            response: response(
+                SscStatus::Normal,
+                Sscdrrn005pd2a5::VALID_OUTPUT_MIN_COUNTS - 1,
+            ),
         };
         let mut sensor = SscDifferentialPressure::<_, Sscdrrn005pd2a5>::new(i2c).unwrap();
 
         assert_eq!(
             block_on(sensor.read_pressure()),
             Err(SscError::PressureCountsOutOfRange {
-                counts: Sscdrrn005pd2a5::OUTPUT_MIN_COUNTS - 1,
-                min: Sscdrrn005pd2a5::OUTPUT_MIN_COUNTS,
-                max: Sscdrrn005pd2a5::OUTPUT_MAX_COUNTS,
+                counts: Sscdrrn005pd2a5::VALID_OUTPUT_MIN_COUNTS - 1,
+                min: Sscdrrn005pd2a5::VALID_OUTPUT_MIN_COUNTS,
+                max: Sscdrrn005pd2a5::VALID_OUTPUT_MAX_COUNTS,
             })
         );
     }
@@ -491,7 +517,10 @@ mod tests {
     #[test]
     fn clamp_policy_saturates_counts_below_min() {
         let i2c = DummyI2c {
-            response: response(SscStatus::Normal, Sscdrrn005pd2a5::OUTPUT_MIN_COUNTS - 1),
+            response: response(
+                SscStatus::Normal,
+                Sscdrrn005pd2a5::VALID_OUTPUT_MIN_COUNTS - 1,
+            ),
         };
         let mut sensor = SscDifferentialPressure::<_, Sscdrrn005pd2a5>::new(i2c).unwrap();
         sensor.set_out_of_range_policy(OutOfRangePolicy::Clamp);
@@ -503,7 +532,7 @@ mod tests {
     #[test]
     fn temperature_api_rejects_specs_without_valid_temperature_output() {
         let i2c = DummyI2c {
-            response: response(SscStatus::Normal, Sscdrrn005pd2a5::OUTPUT_MIN_COUNTS),
+            response: response(SscStatus::Normal, Sscdrrn005pd2a5::VALID_OUTPUT_MIN_COUNTS),
         };
         let mut sensor = SscDifferentialPressure::<_, Sscdrrn005pd2a5>::new(i2c).unwrap();
 
@@ -516,7 +545,7 @@ mod tests {
     #[test]
     fn temperature_api_returns_temperature_for_valid_temperature_specs() {
         let i2c = DummyI2c {
-            response: response(SscStatus::Normal, Sscdrrn005pd2a5::OUTPUT_MIN_COUNTS),
+            response: response(SscStatus::Normal, Sscdrrn005pd2a5::VALID_OUTPUT_MIN_COUNTS),
         };
         let mut sensor = SscDifferentialPressure::<_, TemperatureOutputSpec>::new(i2c).unwrap();
         let sample = block_on(sensor.read_pressure_and_temperature_11bit()).unwrap();
